@@ -1,0 +1,61 @@
+# JustQ-Korea/delivery-tracker (fork) 빌드→ECR 워크플로
+# org 컨벤션(market-resd/ownerclan) 동일: configure-aws-credentials(secrets) → ecr-login → build/push
+name: build-push-ecr
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: delivery-tracker
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify AWS secrets
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::error::AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY repository secrets 필요"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          SHA_TAG="${GITHUB_SHA::12}"
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$SHA_TAG"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$SHA_TAG" --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "pushed: $IMAGE"
+          echo "digest: $ECR_REGISTRY/$ECR_REPOSITORY@$DIGEST"
+          echo "digest=$ECR_REGISTRY/$ECR_REPOSITORY@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          echo "## 이미지 digest (docker-compose 핀)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
