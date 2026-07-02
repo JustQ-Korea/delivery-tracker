@@ -1,0 +1,45 @@
+# 매일 upstream(shlee322/delivery-tracker) 최신 carrier fix를 fork main으로 sync.
+# 변경이 들어오면 build-push-ecr 를 트리거하여 새 ECR digest 를 빌드한다.
+# (배포는 별도: minions-server 의 gated 자동업데이트 워크플로가 dual-read 검증 후 digest bump.)
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 매일 03:00 KST (18:00 UTC), 저부하
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork main from upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BEFORE=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq '.object.sha')
+          echo "before=$BEFORE"
+          # GitHub merge-upstream: fork main <- upstream default branch
+          RESP=$(gh api repos/${{ github.repository }}/merge-upstream -f branch=main 2>&1 || true)
+          echo "$RESP"
+          AFTER=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq '.object.sha')
+          echo "after=$AFTER"
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "upstream 변경 병합됨: $BEFORE -> $AFTER"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "변경 없음 (up to date)"
+          fi
+
+      - name: Trigger image rebuild (변경 시)
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # merge-upstream push는 GITHUB_TOKEN이라 build-push-ecr(push 트리거)를 자동발화 안 함 → 명시 dispatch
+        run: gh workflow run build-push-ecr.yml --ref main
