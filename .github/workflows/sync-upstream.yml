@@ -1,6 +1,7 @@
 # 매일 upstream(shlee322/delivery-tracker) 최신 carrier fix를 fork main으로 sync.
-# 변경이 들어오면 build-push-ecr 를 트리거하여 새 ECR digest 를 빌드한다.
-# (배포는 별도: minions-server 의 gated 자동업데이트 워크플로가 dual-read 검증 후 digest bump.)
+# 변경이 있으면: (1) Teams 알림(커밋/영향 carrier) (2) 이미지 rebuild(ECR 준비).
+# ★배포는 자동 안 함 — 사람이 알림 보고 필요 시 minions-server docker-compose
+#   delivery-tracker digest bump PR(사람 머지)로 수동 배포. 정산 경로 자동변경 0.
 name: sync-upstream
 
 on:
@@ -16,6 +17,9 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (alert 스크립트)
+        uses: actions/checkout@v4
+
       - name: Sync fork main from upstream
         id: sync
         env:
@@ -24,11 +28,11 @@ jobs:
           set -e
           BEFORE=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq '.object.sha')
           echo "before=$BEFORE"
-          # GitHub merge-upstream: fork main <- upstream default branch
-          RESP=$(gh api repos/${{ github.repository }}/merge-upstream -f branch=main 2>&1 || true)
-          echo "$RESP"
+          gh api repos/${{ github.repository }}/merge-upstream -f branch=main || echo "no upstream changes / up to date"
           AFTER=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq '.object.sha')
           echo "after=$AFTER"
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "after=$AFTER" >> "$GITHUB_OUTPUT"
           if [ "$BEFORE" != "$AFTER" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "upstream 변경 병합됨: $BEFORE -> $AFTER"
@@ -37,9 +41,38 @@ jobs:
             echo "변경 없음 (up to date)"
           fi
 
-      - name: Trigger image rebuild (변경 시)
+      - name: Fetch compare detail (변경 상세)
         if: steps.sync.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # merge-upstream push는 GITHUB_TOKEN이라 build-push-ecr(push 트리거)를 자동발화 안 함 → 명시 dispatch
+        run: |
+          gh api "repos/${{ github.repository }}/compare/${{ steps.sync.outputs.before }}...${{ steps.sync.outputs.after }}" > /tmp/compare.json
+
+      - name: Configure AWS credentials
+        if: steps.sync.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      - name: Notify Teams (상류 변경 알림)
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          BEFORE: ${{ steps.sync.outputs.before }}
+          AFTER: ${{ steps.sync.outputs.after }}
+          COMPARE_FILE: /tmp/compare.json
+        run: |
+          set -e
+          URL=$(aws ssm get-parameter --region ap-northeast-2 --name /minions/prod/teams/system-alert-webhook-url --with-decryption --query Parameter.Value --output text)
+          python3 .github/scripts/upstream_alert.py "$URL" > /tmp/alert.json
+          aws lambda invoke --region ap-northeast-2 --function-name minions-supports-alert_messenger \
+            --cli-binary-format raw-in-base64-out --payload file:///tmp/alert.json /tmp/resp.json >/dev/null
+          python3 -c "import json,sys;d=json.load(open('/tmp/resp.json'));print('alert is_success:',d.get('is_success'),d.get('error'));sys.exit(0 if d.get('is_success') else 1)"
+
+      - name: Trigger image rebuild (ECR 준비 — 배포는 수동)
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run build-push-ecr.yml --ref main
