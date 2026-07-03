@@ -1,3 +1,7 @@
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: false
+
 # 매일 upstream(shlee322/delivery-tracker) 최신 carrier fix를 fork main으로 sync.
 # 변경이 있으면: (1) Teams 알림(커밋/영향 carrier) (2) 이미지 rebuild(ECR 준비).
 # ★배포는 자동 안 함 — 사람이 알림 보고 필요 시 minions-server docker-compose

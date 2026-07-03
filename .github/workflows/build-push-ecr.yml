@@ -1,3 +1,7 @@
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: false
+
 # JustQ-Korea/delivery-tracker (fork) 빌드→ECR 워크플로
 # org 컨벤션(market-resd/ownerclan) 동일: configure-aws-credentials(secrets) → ecr-login → build/push
 name: build-push-ecr
